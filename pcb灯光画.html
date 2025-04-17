@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8" />
+  <title>智能PCB图像处理</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/browser-image-compression@2.0.2/dist/browser-image-compression.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/FileSaver.js/2.0.5/FileSaver.min.js"></script>
+  <style>
+    .fade {
+      transition: opacity 0.5s ease;
+    }
+    @media (max-width: 768px) {
+      .container {
+        padding: 20px;
+      }
+      .canvas-container {
+        width: 100%;
+      }
+    }
+  </style>
+</head>
+<body class="bg-gray-100 text-gray-900 font-sans p-6">
+  <div class="max-w-6xl mx-auto space-y-6 container">
+    <h1 class="text-3xl font-bold text-center">智能PCB图像处理工作台</h1>
+
+    <!-- 上传区域 -->
+    <div id="drop-area" class="border-2 border-dashed border-blue-400 rounded-lg p-6 bg-white text-center cursor-pointer">
+      <p class="text-lg">点击或拖拽图片到此</p>
+      <input type="file" id="uploader" accept="image/*" class="hidden">
+      <div id="img-info" class="text-sm text-gray-600 mt-2"></div>
+    </div>
+
+    <!-- 色系选择 -->
+    <div id="colorSelection" class="hidden space-y-2 bg-white p-4 rounded shadow">
+      <h2 class="font-semibold">选择主颜色系：</h2>
+      <div class="flex gap-4">
+        <label class="flex items-center space-x-2">
+          <input type="radio" name="mainColor" value="blue" class="accent-blue-600">
+          <span>蓝色系</span>
+        </label>
+        <label class="flex items-center space-x-2">
+          <input type="radio" name="mainColor" value="red" class="accent-red-600">
+          <span>红色系</span>
+        </label>
+        <label class="flex items-center space-x-2">
+          <input type="radio" name="mainColor" value="purple" class="accent-purple-600">
+          <span>紫色系</span>
+        </label>
+      </div>
+    </div>
+
+    <!-- 提示 -->
+    <div id="toast" class="fixed bottom-6 left-1/2 transform -translate-x-1/2 bg-black text-white px-4 py-2 rounded shadow opacity-0 fade text-sm z-50"></div>
+
+    <!-- 原图与简化图 -->
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+      <div class="bg-white rounded shadow p-4 canvas-container">
+        <h2 class="font-semibold mb-2">原图</h2>
+        <canvas id="originalCanvas" class="w-full border rounded"></canvas>
+      </div>
+      <div class="bg-white rounded shadow p-4 canvas-container">
+        <h2 class="font-semibold mb-2">简化图</h2>
+        <canvas id="simplifiedCanvas" class="w-full border rounded"></canvas>
+      </div>
+    </div>
+
+    <!-- 遮罩图层 -->
+    <div class="bg-white rounded shadow p-4">
+      <h2 class="text-lg font-semibold mb-4">遮罩图层（点击下载）</h2>
+      <div id="masks" class="flex flex-wrap gap-4"></div>
+    </div>
+
+    <!-- 合成图层 -->
+    <div class="bg-white rounded shadow p-4">
+      <h2 class="text-lg font-semibold mb-4">合成图层</h2>
+      <div id="layers" class="flex flex-wrap gap-4"></div>
+    </div>
+
+    <!-- 实物预览图 -->
+    <div class="bg-white rounded shadow p-4">
+      <h2 class="text-lg font-semibold mb-4">实物预览图</h2>
+      <div id="preview" class="flex flex-wrap gap-4">
+        <canvas id="previewCanvas" class="w-full border rounded max-w-md"></canvas>
+      </div>
+    </div>
+
+    <!-- 自定义文件名输入框 -->
+    <div class="bg-white p-4 rounded shadow">
+      <h2 class="font-semibold">自定义下载文件名：</h2>
+      <input type="text" id="customFilename" class="w-full p-2 border rounded" placeholder="请输入自定义文件名">
+    </div>
+
+    <!-- 保留底部下载按钮 -->
+    <div class="text-center mt-4">
+      <button onclick="downloadAllAsZip()" class="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded">一键下载所有图片</button>
+    </div>
+  </div>
+
+  <script>
+    const COLOR_SCHEMES = {
+      blue: {
+        '深蓝': [22, 31, 125],
+        '浅蓝': [93, 167, 227],
+        '深绿': [25, 53, 34],
+        '浅绿': [249, 225, 149],
+        '黑色': [6, 16, 8],
+        '白色': [230, 234, 235]
+      },
+      red: {
+        '深蓝': [125, 22, 22],
+        '浅蓝': [227, 93, 93],
+        '深绿': [25, 53, 34],
+        '浅绿': [249, 225, 149],
+        '黑色': [6, 16, 8],
+        '白色': [230, 234, 235]
+      },
+      purple: {
+        '深蓝': [125, 22, 125],
+        '浅蓝': [227, 93, 227],
+        '深绿': [25, 53, 34],
+        '浅绿': [249, 225, 149],
+        '黑色': [6, 16, 8],
+        '白色': [230, 234, 235]
+      }
+    };
+
+    let image, currentColorScheme = {};
+    const renameMap = {
+      '正面铜皮层': '放在顶层',
+      '白色': '放在顶层丝印层',
+      '正面阻焊层': '放在顶层阻焊层',
+      '深蓝': '放在底层注意镜像',
+      '背面阻焊层': '放在底层阻焊层注意镜像'
+    };
+    const maskList = [];
+
+    const uploader = document.getElementById('uploader');
+    const dropArea = document.getElementById('drop-area');
+    const originalCanvas = document.getElementById('originalCanvas');
+    const simplifiedCanvas = document.getElementById('simplifiedCanvas');
+    const masksContainer = document.getElementById('masks');
+    const layersContainer = document.getElementById('layers');
+    const toast = document.getElementById('toast');
+    const imgInfo = document.getElementById('img-info');
+
+    dropArea.addEventListener('click', () => uploader.click());
+    dropArea.addEventListener('dragover', e => { e.preventDefault(); dropArea.classList.add('bg-blue-100'); });
+    dropArea.addEventListener('dragleave', () => dropArea.classList.remove('bg-blue-100'));
+    dropArea.addEventListener('drop', e => {
+      e.preventDefault();
+      dropArea.classList.remove('bg-blue-100');
+      handleImageUpload(e.dataTransfer.files[0]);
+    });
+    uploader.addEventListener('change', e => handleImageUpload(e.target.files[0]));
+
+    function showToast(msg) {
+      toast.innerText = msg;
+      toast.style.opacity = 1;
+      setTimeout(() => { toast.style.opacity = 0; }, 2000);
+    }
+
+    async function handleImageUpload(file) {
+      showToast('正在压缩图片...');
+      if (!file.type.startsWith('image/')) {
+        showToast('请上传有效的图像文件');
+        return;
+      }
+
+      const compressed = await imageCompression(file, {
+        maxSizeMB: 2,
+        maxWidthOrHeight: 1500,
+        useWebWorker: true
+      });
+      const reader = new FileReader();
+      reader.onload = e => {
+        image = new Image();
+        image.onload = () => {
+          originalCanvas.width = simplifiedCanvas.width = image.width;
+          originalCanvas.height = simplifiedCanvas.height = image.height;
+          const ctx = originalCanvas.getContext("2d");
+          ctx.drawImage(image, 0, 0);
+          imgInfo.innerText = `尺寸：${image.width}x${image.height}，文件大小：${(compressed.size / 1024 / 1024).toFixed(2)} MB`;
+          document.getElementById("colorSelection").style.display = "block";
+        };
+        image.src = e.target.result;
+      };
+      reader.readAsDataURL(compressed);
+    }
+
+    document.querySelectorAll('input[name="mainColor"]').forEach(input => {
+      input.addEventListener('change', () => {
+        currentColorScheme = COLOR_SCHEMES[input.value];
+        processPCB();
+      });
+    });
+
+    async function processPCB() {
+      showToast('正在处理图像...');
+      await new Promise(r => setTimeout(r, 100));
+
+      const w = originalCanvas.width, h = originalCanvas.height;
+      const ctx = originalCanvas.getContext('2d');
+      const data = ctx.getImageData(0, 0, w, h);
+      const simplified = simplifiedCanvas.getContext('2d');
+      const newData = simplified.createImageData(w, h);
+      maskList.length = 0;
+
+      const buffers = {};
+      for (const [name, rgb] of Object.entries(currentColorScheme)) {
+        buffers[name] = new Uint8ClampedArray(w * h * 4);
+      }
+
+      for (let i = 0; i < data.data.length; i += 4) {
+        const pixel = [data.data[i], data.data[i+1], data.data[i+2]];
+        let closest = '白色', minDist = Infinity;
+        for (const [name, color] of Object.entries(currentColorScheme)) {
+          const d = Math.hypot(...color.map((c, idx) => c - pixel[idx]));
+          if (d < minDist) {
+            minDist = d;
+            closest = name;
+          }
+        }
+        const mappedColor = currentColorScheme[closest];
+        newData.data.set([...mappedColor, 255], i);
+        buffers[closest].set([...mappedColor, 255], i);
+      }
+
+      simplified.putImageData(newData, 0, 0);
+      masksContainer.innerHTML = '';
+      for (const [name, buffer] of Object.entries(buffers)) {
+        const canvas = document.createElement('canvas');
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        ctx.putImageData(new ImageData(buffer, w, h), 0, 0);
+        // 添加四个角的定位像素点
+        const markerColor = 'red';
+        const markerSize = 1;
+        ctx.fillStyle = markerColor;
+        ctx.fillRect(0, 0, markerSize, markerSize); // 左上
+        ctx.fillRect(w - markerSize, 0, markerSize, markerSize); // 右上
+        ctx.fillRect(0, h - markerSize, markerSize, markerSize); // 左下
+        ctx.fillRect(w - markerSize, h - markerSize, markerSize, markerSize); // 右下
+
+        const img = document.createElement('img');
+        img.src = canvas.toDataURL();
+        img.className = "w-24 h-24 rounded border hover:shadow cursor-pointer";
+        img.title = name;
+        img.onclick = () => downloadImage(img.src, `${name}_mask.png`);
+        masksContainer.appendChild(img);
+        maskList.push({ name, canvas, dataURL: img.src });
+      }
+
+      generateLayers(maskList);
+
+      // 生成实物预览图
+      const previewCanvas = document.getElementById('previewCanvas');
+      previewCanvas.width = w;
+      previewCanvas.height = h;
+      const previewCtx = previewCanvas.getContext('2d');
+      const previewData = previewCtx.createImageData(w, h);
+
+      for (let i = 0; i < newData.data.length; i += 4) {
+        // 如果是黑色像素(6,16,8)，则替换为银色(#a0a0a0)
+        if (newData.data[i] === 6 && newData.data[i+1] === 16 && newData.data[i+2] === 8) {
+          previewData.data[i] = 160;     // R
+          previewData.data[i+1] = 160;   // G
+          previewData.data[i+2] = 160;   // B
+          previewData.data[i+3] = 255;   // A
+        } else {
+          // 其他颜色保持不变
+          previewData.data.set(newData.data.slice(i, i+4), i);
+        }
+      }
+
+      previewCtx.putImageData(previewData, 0, 0);
+
+      // 添加下载按钮
+      const previewImg = document.createElement('img');
+      previewImg.src = previewCanvas.toDataURL();
+      previewImg.className = "w-24 h-24 rounded border hover:shadow cursor-pointer";
+      previewImg.title = "实物预览图";
+      previewImg.onclick = () => downloadImage(previewImg.src, '实物预览图.png');
+      document.getElementById('preview').appendChild(previewImg);
+      maskList.push({ name: '实物预览图', canvas: previewCanvas, dataURL: previewImg.src });
+
+      showToast('处理完成');
+    }
+
+    function generateLayers(masks) {
+      const w = originalCanvas.width, h = originalCanvas.height;
+      layersContainer.innerHTML = '';
+
+      const combine = (names) => {
+        const canvas = document.createElement('canvas');
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        names.forEach(n => {
+          const m = masks.find(m => m.name === n);
+          if (m) ctx.drawImage(m.canvas, 0, 0);
+        });
+        return canvas;
+      };
+
+      const layers = {
+        '正面阻焊层': combine(['深绿', '浅绿', '黑色']),
+        '正面铜皮层': combine(['浅蓝', '黑色']),
+        '背面阻焊层': combine(['浅绿'])
+      };
+
+      for (const [layerName, canvas] of Object.entries(layers)) {
+        const img = document.createElement('img');
+        img.src = canvas.toDataURL();
+        img.className = "w-24 h-24 rounded border hover:shadow cursor-pointer";
+        img.title = layerName;
+        img.onclick = () => downloadImage(img.src, `${layerName}.png`);
+        layersContainer.appendChild(img);
+        maskList.push({ name: layerName, canvas, dataURL: img.src });
+      }
+    }
+
+    function downloadImage(url, filename) {
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      a.click();
+    }
+
+    function downloadAllAsZip() {
+      const customFilename = document.getElementById('customFilename').value.trim() || 'pcb灯光画'; // Default name if not entered
+      showToast('正在打包下载...');
+      
+      const zip = new JSZip();
+      maskList.forEach(({ name, dataURL }) => {
+        const rename = renameMap[name] || name;
+        const base64 = dataURL.split(',')[1];
+        zip.file(`${rename}.png`, base64, { base64: true });
+      });
+
+      // Only show the "download complete" message after the download starts
+      zip.generateAsync({ type: "blob" }).then((blob) => {
+        saveAs(blob, `${customFilename}.zip`);
+        setTimeout(() => showToast('下载完成！'), 1000);
+      });
+    }
+  </script>
+</body>
+</html>
